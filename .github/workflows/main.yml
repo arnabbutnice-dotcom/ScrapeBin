@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # Crucial: Allows the action to edit your README
+  contents: write
 
 jobs:
   build_and_upload:
@@ -19,12 +19,14 @@ jobs:
       - name: Install Tools
         run: |
           npm install rebrowser-puppeteer
+          npx puppeteer browsers install chrome
           pip install internetarchive
 
       - name: Run Scraper and Update Dashboard
         run: node index.js
 
       - name: Save README Dashboard Changes
+        if: always()
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
@@ -38,7 +40,7 @@ jobs:
           IA_SECRET: ${{ secrets.IA_SECRET_KEY }}
         run: |
           ia configure --access-key="$IA_ACCESS" --secret-key="$IA_SECRET"
-          # Note: IA allows up to 18GB per file now. 
+          # Using the 18GB per file logic for your vault
           ia upload scrape-bin-vault-2026 ./results.json \
             --metadata="mediatype:texts" \
             --metadata="title:Automated SearXNG Results"
