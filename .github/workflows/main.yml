@@ -1,6 +1,9 @@
 name: SearXNG to IA Vault
 on:
-  workflow_dispatch: # This adds a "Run" button for you on mobile
+  workflow_dispatch:
+
+permissions:
+  contents: write # Crucial: Allows the action to edit your README
 
 jobs:
   build_and_upload:
@@ -18,8 +21,16 @@ jobs:
           npm install rebrowser-puppeteer
           pip install internetarchive
 
-      - name: Run Stealth Scrape
-        run: node index.js # This must match your scraper filename
+      - name: Run Scraper and Update Dashboard
+        run: node index.js
+
+      - name: Save README Dashboard Changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add README.md
+          git commit -m "Update ScrapeBin Stats" || echo "No changes to commit"
+          git push
 
       - name: Upload to Internet Archive
         env:
@@ -27,7 +38,7 @@ jobs:
           IA_SECRET: ${{ secrets.IA_SECRET_KEY }}
         run: |
           ia configure --access-key="$IA_ACCESS" --secret-key="$IA_SECRET"
-          # Replace 'my-unique-identifier-2026' with your own name
-          ia upload my-search-vault-2026 ./results.json \
+          # Note: IA allows up to 18GB per file now. 
+          ia upload scrape-bin-vault-2026 ./results.json \
             --metadata="mediatype:texts" \
             --metadata="title:Automated SearXNG Results"
