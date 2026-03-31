@@ -11,39 +11,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node and Python
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
       - name: Install Tools
         run: |
-          npm install rebrowser-puppeteer puppeteer-core
-          # Downloads the specific Chrome binary needed for the runner
-          npx puppeteer browsers install chrome
+          npm install rebrowser-puppeteer
           pip install internetarchive
 
-      - name: Run Scraper and Update Dashboard
+      - name: Run Scraper
         run: node index.js
+        env:
+          PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
 
-      - name: Save readme.md Dashboard Changes
+      - name: Update readme.md
         if: always()
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          # Using lowercase to match your repository
-          git add readme.md || echo "readme.md not found"
-          git commit -m "Update ScrapeBin Stats" || echo "No changes to commit"
+          git add readme.md || echo "No readme found"
+          git commit -m "Update stats" || echo "No changes"
           git push
 
-      - name: Upload to Internet Archive
-        # This step only runs if index.js successfully created results.json
+      - name: IA Upload
         env:
           IA_ACCESS: ${{ secrets.IA_ACCESS_KEY }}
           IA_SECRET: ${{ secrets.IA_SECRET_KEY }}
         run: |
           ia configure --access-key="$IA_ACCESS" --secret-key="$IA_SECRET"
-          # Target identifier for your 18GB project vault
+          # Ready for your 18GB file project
           ia upload scrape-bin-vault-2026 ./results.json \
             --metadata="mediatype:texts" \
-            --metadata="title:Automated SearXNG Results"
+            --metadata="title:SearXNG Scrape Results" || echo "File already deleted or missing"
