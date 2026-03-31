@@ -140,11 +140,10 @@ jobs:
         env:
           IA_ACCESS_KEY: ${{ secrets.IA_ACCESS_KEY }}
           IA_SECRET_KEY: ${{ secrets.IA_SECRET_KEY }}
-          IA_IDENTIFIER: "ScrapeBin-Search"
         run: |
-          # The IA CLI tool makes uploading a single one-liner
-          ia configure --access-key="$IA_ACCESS_KEY" --secret-key="$IA_SECRET_KEY"
-          ia upload "$IA_IDENTIFIER" results.jsonl metadata.json --overwrite
+          # The IA CLI automatically reads the IA_ACCESS_KEY and IA_SECRET_KEY from the env above!
+          # We also add metadata so it can create "ScrapeBin-Search" if it doesn't exist yet.
+          ia upload "ScrapeBin-Search" results.jsonl metadata.json --metadata="title:ScrapeBin Search API" --metadata="mediatype:data" --overwrite
 
       - name: Delete files from GitHub Runner
         run: |
