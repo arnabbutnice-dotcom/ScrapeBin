@@ -4,29 +4,39 @@ const fs = require('fs');
 async function run() {
     const browser = await puppeteer.launch({
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--single-process', '--no-zygote']
+        // Using the pre-installed Chrome on GitHub's runner
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome',
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
 
     const page = await browser.newPage();
-    const url = "https://searxng.canine.tools/search?q=test&format=json";
+    // THE LINK: exactly as you requested
+    const url = "https://searxng.canine.tools/search?q=\"\"&format=json";
     const resultsFile = 'results.json';
-    
-    // Updated to lowercase to match your repo
     const readmeFile = 'readme.md';
 
     try {
-        console.log("Connecting to SearXNG...");
+        console.log(`Hitting ${url}...`);
         await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+        
+        // Extracting raw text from the JSON response
         const content = await page.evaluate(() => document.body.innerText);
         
+        // 1. Create results.json
         fs.writeFileSync(resultsFile, content);
-        const data = JSON.parse(content);
         
+        let resultCount = 0;
+        try {
+            const data = JSON.parse(content);
+            resultCount = data.results ? data.results.length : 0;
+        } catch (e) {
+            console.log("Response wasn't valid JSON, but saving raw content anyway.");
+        }
+        
+        // 2. Stats for readme.md
         const stats = fs.statSync(resultsFile);
-        const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
-        const resultCount = data.results ? data.results.length : 0;
+        const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(4);
 
-        // Ensure we find the file regardless of existence
         let readmeContent = fs.existsSync(readmeFile) ? fs.readFileSync(readmeFile, 'utf8') : "# ScrapeBin\n";
 
         const sizeLabel = "Size of the storage:";
@@ -35,6 +45,30 @@ async function run() {
         const newCountLine = `${countLabel} ${resultCount}`;
 
         function updateOrAppend(content, label, newLine) {
+            const regex = new RegExp(`^${label}.*`, 'm');
+            if (regex.test(content)) {
+                return content.replace(regex, newLine);
+            } else {
+                return content.trim() + "\n\n" + newLine;
+            }
+        }
+
+        readmeContent = updateOrAppend(readmeContent, sizeLabel, newSizeLine);
+        readmeContent = updateOrAppend(readmeContent, countLabel, newCountLine);
+
+        fs.writeFileSync(readmeFile, readmeContent);
+        console.log("Stats updated. Deleting local results.json (IA step will handle the upload).");
+        
+        // Final cleanup as requested
+        fs.unlinkSync(resultsFile);
+
+    } catch (e) {
+        console.error("Failed to fetch link:", e.message);
+    } finally {
+        await browser.close();
+    }
+}
+run();        function updateOrAppend(content, label, newLine) {
             const regex = new RegExp(`^${label}.*`, 'm');
             if (regex.test(content)) {
                 return content.replace(regex, newLine);
