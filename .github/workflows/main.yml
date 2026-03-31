@@ -1,9 +1,6 @@
-name: IA-Vault-Uploader
+name: SearXNG to IA Vault
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 permissions:
   contents: write
@@ -43,6 +40,7 @@ jobs:
           IA_SECRET: ${{ secrets.IA_SECRET_KEY }}
         run: |
           ia configure --access-key="$IA_ACCESS" --secret-key="$IA_SECRET"
+          # Using the 18GB per file logic for your vault
           ia upload scrape-bin-vault-2026 ./results.json \
             --metadata="mediatype:texts" \
             --metadata="title:Automated SearXNG Results"
