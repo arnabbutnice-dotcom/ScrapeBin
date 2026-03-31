@@ -1,47 +1,151 @@
-name: SearXNG to IA Vault
-on:
-  workflow_dispatch:
+name: Search API Pipeline
 
-permissions:
-  contents: write
+on:
+  schedule:
+    - cron: "0 0 * * *" # Runs every day at midnight UTC
+  workflow_dispatch:    # Allows you to click "Run workflow" manually
 
 jobs:
-  build_and_upload:
+  scrape-and-upload:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # Needed to push README changes
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          node-version: '20'
+          python-version: "3.11"
 
-      - name: Install Tools
+      - name: Install Dependencies
+        run: pip install requests beautifulsoup4 internetarchive
+
+      - name: Run Scraper and Update Files
         run: |
-          npm install rebrowser-puppeteer
-          pip install internetarchive
+          cat << 'EOF' > pipeline.py
+          import os, json, time, requests, re
+          from bs4 import BeautifulSoup
+          from datetime import datetime, timezone
 
-      - name: Run Scraper
-        run: node index.js
+          # Configuration
+          QUERIES_FILE = "queries.txt"
+          RESULTS_FILE = "results.jsonl"
+          METADATA_FILE = "metadata.json"
+          README_FILE = "README.md"
+          
+          # Built-in fallback instances
+          INSTANCES = [
+              "https://searx.be",
+              "https://searxng.site",
+              "https://search.ononoki.org",
+              "https://priv.au",
+              "https://paulgo.io"
+          ]
+
+          HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+          # 1. Ensure files exist
+          if not os.path.exists(QUERIES_FILE):
+              with open(QUERIES_FILE, "w") as f: f.write("open source\npython\n")
+          if not os.path.exists(README_FILE):
+              with open(README_FILE, "w") as f: f.write("# Search API\n\n")
+          open(RESULTS_FILE, 'a').close()
+
+          # 2. Scrape Data
+          with open(QUERIES_FILE, "r") as f:
+              queries = [line.strip() for line in f if line.strip()]
+
+          total_new_results = 0
+          with open(RESULTS_FILE, "a", encoding="utf-8") as outfile:
+              for query in queries:
+                  for instance in INSTANCES:
+                      try:
+                          res = requests.get(f"{instance}/search", params={"q": query}, headers=HEADERS, timeout=15)
+                          if res.status_code == 200:
+                              soup = BeautifulSoup(res.text, "html.parser")
+                              articles = soup.find_all("article", class_="result")
+                              
+                              for art in articles:
+                                  h3 = art.find("h3")
+                                  if not h3 or not h3.find("a"): continue
+                                  a_tag = h3.find("a")
+                                  
+                                  content_tag = art.find("p", class_="content")
+                                  engines_tag = art.find(class_="engines")
+                                  
+                                  item = {
+                                      "query": query,
+                                      "date": datetime.now(timezone.utc).isoformat(),
+                                      "search_provider": engines_tag.get_text(strip=True) if engines_tag else "unknown",
+                                      "title": a_tag.get_text(strip=True),
+                                      "url": a_tag.get("href"),
+                                      "snippet": content_tag.get_text(strip=True) if content_tag else ""
+                                  }
+                                  outfile.write(json.dumps(item, ensure_ascii=False) + "\n")
+                                  total_new_results += 1
+                              time.sleep(2) # Be polite
+                              break # Success, move to next query
+                      except Exception:
+                          continue
+
+          # 3. Create Metadata
+          whole_size = os.path.getsize(RESULTS_FILE)
+          with open(RESULTS_FILE, "r", encoding="utf-8") as f:
+              total_historical_results = sum(1 for _ in f)
+
+          metadata = {
+              "last_updated": datetime.now(timezone.utc).isoformat(),
+              "number_of_results": total_historical_results,
+              "whole_size_bytes": whole_size
+          }
+          with open(METADATA_FILE, "w", encoding="utf-8") as f:
+              json.dump(metadata, f, indent=2)
+
+          # 4. Update README
+          def format_size(size_bytes):
+              for unit in ['B', 'KB', 'MB', 'GB']:
+                  if size_bytes < 1024.0: return f"{size_bytes:.2f} {unit}"
+                  size_bytes /= 1024.0
+              return f"{size_bytes:.2f} TB"
+
+          with open(README_FILE, "r", encoding="utf-8") as f: text = f.read()
+
+          for label, val in [
+              ("Number of Results:", str(total_historical_results)),
+              ("Time when updated:", metadata["last_updated"]),
+              ("Whole size:", format_size(whole_size))
+          ]:
+              pattern = rf"^{re.escape(label)}.*$"
+              if re.search(pattern, text, flags=re.MULTILINE):
+                  text = re.sub(pattern, f"{label} {val}", text, flags=re.MULTILINE)
+              else:
+                  text = text.strip() + f"\n{label} {val}"
+
+          with open(README_FILE, "w", encoding="utf-8") as f: f.write(text + "\n")
+          EOF
+          
+          python pipeline.py
+
+      - name: Commit and Push README changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update README stats automatically" && git push)
+
+      - name: Upload to Internet Archive
         env:
-          PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
-
-      - name: Update readme.md
-        if: always()
+          IA_ACCESS_KEY: ${{ secrets.IA_ACCESS_KEY }}
+          IA_SECRET_KEY: ${{ secrets.IA_SECRET_KEY }}
+          IA_IDENTIFIER: "ScrapeBin-Search"
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add readme.md || echo "No readme found"
-          git commit -m "Update stats" || echo "No changes"
-          git push
+          # The IA CLI tool makes uploading a single one-liner
+          ia configure --access-key="$IA_ACCESS_KEY" --secret-key="$IA_SECRET_KEY"
+          ia upload "$IA_IDENTIFIER" results.jsonl metadata.json --overwrite
 
-      - name: IA Upload
-        env:
-          IA_ACCESS: ${{ secrets.IA_ACCESS_KEY }}
-          IA_SECRET: ${{ secrets.IA_SECRET_KEY }}
+      - name: Delete files from GitHub Runner
         run: |
-          ia configure --access-key="$IA_ACCESS" --secret-key="$IA_SECRET"
-          # Ready for your 18GB file project
-          ia upload scrape-bin-vault-2026 ./results.json \
-            --metadata="mediatype:texts" \
-            --metadata="title:SearXNG Scrape Results" || echo "File already deleted or missing"
+          rm -f results.jsonl metadata.json pipeline.py
