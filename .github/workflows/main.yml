@@ -1,46 +1,58 @@
-name: SearXNG to IA Vault
-on:
-  workflow_dispatch:
+const puppeteer = require('rebrowser-puppeteer');
+const fs = require('fs');
 
-permissions:
-  contents: write
+async function run() {
+    const browser = await puppeteer.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--single-process', '--no-zygote']
+    });
 
-jobs:
-  build_and_upload:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    const page = await browser.newPage();
+    const url = "https://searxng.canine.tools/search?q=test&format=json";
+    const resultsFile = 'results.json';
+    
+    // Updated to lowercase to match your repo
+    const readmeFile = 'readme.md';
 
-      - name: Setup Node and Python
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+    try {
+        console.log("Connecting to SearXNG...");
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+        const content = await page.evaluate(() => document.body.innerText);
+        
+        fs.writeFileSync(resultsFile, content);
+        const data = JSON.parse(content);
+        
+        const stats = fs.statSync(resultsFile);
+        const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+        const resultCount = data.results ? data.results.length : 0;
 
-      - name: Install Tools
-        run: |
-          npm install rebrowser-puppeteer
-          npx puppeteer browsers install chrome
-          pip install internetarchive
+        // Ensure we find the file regardless of existence
+        let readmeContent = fs.existsSync(readmeFile) ? fs.readFileSync(readmeFile, 'utf8') : "# ScrapeBin\n";
 
-      - name: Run Scraper and Update Dashboard
-        run: node index.js
+        const sizeLabel = "Size of the storage:";
+        const countLabel = "No of results:";
+        const newSizeLine = `${sizeLabel} ${fileSizeMB} MB`;
+        const newCountLine = `${countLabel} ${resultCount}`;
 
-      - name: Save README Dashboard Changes
-        if: always()
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add README.md
-          git commit -m "Update ScrapeBin Stats" || echo "No changes to commit"
-          git push
+        function updateOrAppend(content, label, newLine) {
+            const regex = new RegExp(`^${label}.*`, 'm');
+            if (regex.test(content)) {
+                return content.replace(regex, newLine);
+            } else {
+                return content.trim() + "\n\n" + newLine;
+            }
+        }
 
-      - name: Upload to Internet Archive
-        env:
-          IA_ACCESS: ${{ secrets.IA_ACCESS_KEY }}
-          IA_SECRET: ${{ secrets.IA_SECRET_KEY }}
-        run: |
-          ia configure --access-key="$IA_ACCESS" --secret-key="$IA_SECRET"
-          # Using the 18GB per file logic for your vault
-          ia upload scrape-bin-vault-2026 ./results.json \
-            --metadata="mediatype:texts" \
-            --metadata="title:Automated SearXNG Results"
+        readmeContent = updateOrAppend(readmeContent, sizeLabel, newSizeLine);
+        readmeContent = updateOrAppend(readmeContent, countLabel, newCountLine);
+
+        fs.writeFileSync(readmeFile, readmeContent);
+        console.log("readme.md updated.");
+
+    } catch (e) {
+        console.error("Workflow Error:", e.message);
+    } finally {
+        await browser.close();
+    }
+}
+run();
