@@ -20,20 +20,35 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Dependencies and SearXNG
+      - name: Install base dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          python -m pip install requests internetarchive msgspec
-          python -m pip install --no-build-isolation "git+https://github.com/searxng/searxng.git"
+          python -m pip install requests beautifulsoup4 internetarchive PyYAML msgspec
 
-      - name: Create SearXNG Settings
+      - name: Fetch pinned SearXNG source
+        run: |
+          rm -rf searxng
+          mkdir searxng
+          cd searxng
+          git init
+          git remote add origin https://github.com/searxng/searxng.git
+          git fetch --depth 1 origin 7ac4ff39fee4cdde223dbab6a83af9c26b56366e
+          git checkout FETCH_HEAD
+
+      - name: Install SearXNG runtime requirements
+        run: |
+          if [ ! -f searxng/requirements.txt ]; then
+            echo "ERROR: searxng/requirements.txt not found"
+            find searxng -maxdepth 2 -type f | sort
+            exit 1
+          fi
+          python -m pip install -r searxng/requirements.txt
+
+      - name: Create SearXNG settings
         run: |
           mkdir -p ~/.config/searxng
           cat > ~/.config/searxng/settings.yml << 'YAML'
           use_default_settings: true
-
-          general:
-            debug: false
 
           search:
             formats:
@@ -48,31 +63,31 @@ jobs:
           limiter: false
           YAML
 
-      - name: Start SearXNG
+      - name: Start local SearXNG
         run: |
+          cd searxng
+          export SEARXNG_SETTINGS_PATH="$HOME/.config/searxng/settings.yml"
           nohup python -m searx.webapp > /tmp/searxng.log 2>&1 &
           echo $! > /tmp/searxng.pid
 
-          echo "Waiting for SearXNG to start..."
           READY=0
-          for i in $(seq 1 60); do
+          echo "Waiting for SearXNG..."
+          for i in $(seq 1 90); do
             if curl -fsS "http://127.0.0.1:8080/search?q=test&format=json" > /dev/null; then
-              echo "SearXNG is ready."
+              echo "SearXNG is ready"
               READY=1
               break
             fi
-            echo "Still waiting... ($i/60)"
             sleep 2
           done
 
           if [ "$READY" -ne 1 ]; then
-            echo "SearXNG failed to start."
-            echo "----- SearXNG LOG -----"
+            echo "Local SearXNG failed to start"
+            echo "----- searxng log -----"
             cat /tmp/searxng.log || true
-            exit 1
           fi
 
-      - name: Run Scraper, Update README, Upload to IA
+      - name: Run scraper, update README, upload to IA
         shell: python
         env:
           IA_ACCESS_KEY: ${{ secrets.IA_ACCESS_KEY }}
@@ -84,21 +99,33 @@ jobs:
           import sys
           import time
           import requests
+          from bs4 import BeautifulSoup
           from datetime import datetime, timezone
           from internetarchive import get_session
 
-          ia_access = os.environ.get("IA_ACCESS_KEY")
-          ia_secret = os.environ.get("IA_SECRET_KEY")
+          IA_ACCESS = os.environ.get("IA_ACCESS_KEY")
+          IA_SECRET = os.environ.get("IA_SECRET_KEY")
 
-          if not ia_access or not ia_secret:
+          if not IA_ACCESS or not IA_SECRET:
               print("ERROR: IA_ACCESS_KEY or IA_SECRET_KEY is missing.")
               sys.exit(1)
 
-          SEARXNG_URL = "http://127.0.0.1:8080/search"
           QUERIES_FILE = "queries.txt"
           RESULTS_FILE = "results.jsonl"
           METADATA_FILE = "metadata.json"
           README_FILE = "README.md"
+
+          LOCAL_SEARXNG_URL = "http://127.0.0.1:8080/search"
+          PUBLIC_INSTANCES = [
+              "https://searx.be",
+              "https://search.ononoki.org",
+              "https://priv.au",
+              "https://paulgo.io"
+          ]
+
+          HEADERS = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          }
 
           def now_iso():
               return datetime.now(timezone.utc).isoformat()
@@ -109,25 +136,83 @@ jobs:
                       return f"{round(size_bytes, 2)} {unit}"
                   size_bytes /= 1024.0
 
-          # Ensure files exist
-          if not os.path.exists(QUERIES_FILE):
-              with open(QUERIES_FILE, "w", encoding="utf-8") as f:
-                  f.write("open source\npython\n")
+          def ensure_file(path, default_text=""):
+              if not os.path.exists(path):
+                  with open(path, "w", encoding="utf-8") as f:
+                      f.write(default_text)
 
-          if not os.path.exists(README_FILE):
-              with open(README_FILE, "w", encoding="utf-8") as f:
-                  f.write("# Search API\n\n")
+          def search_local_json(query):
+              res = requests.get(
+                  LOCAL_SEARXNG_URL,
+                  params={"q": query, "format": "json"},
+                  timeout=30
+              )
+              res.raise_for_status()
+              data = res.json()
+              results = []
+              for r in data.get("results", []):
+                  results.append({
+                      "query": query,
+                      "date": now_iso(),
+                      "search_provider": r.get("engine", "unknown"),
+                      "title": r.get("title", ""),
+                      "url": r.get("url", ""),
+                      "snippet": r.get("content", ""),
+                      "instance": "http://127.0.0.1:8080",
+                      "mode": "local-json"
+                  })
+              return results
 
-          if not os.path.exists(RESULTS_FILE):
-              open(RESULTS_FILE, "w", encoding="utf-8").close()
+          def search_public_html(query):
+              for instance in PUBLIC_INSTANCES:
+                  try:
+                      res = requests.get(
+                          instance + "/search",
+                          params={"q": query},
+                          headers=HEADERS,
+                          timeout=20
+                      )
+                      if res.status_code != 200:
+                          continue
 
-          # Health check before scraping
-          try:
-              health = requests.get(SEARXNG_URL, params={"q": "test", "format": "json"}, timeout=30)
-              health.raise_for_status()
-          except Exception as e:
-              print(f"ERROR: local SearXNG is not responding: {e}")
-              sys.exit(1)
+                      soup = BeautifulSoup(res.text, "html.parser")
+                      articles = soup.find_all("article", class_="result")
+                      parsed = []
+
+                      for art in articles:
+                          h3 = art.find("h3")
+                          if not h3:
+                              continue
+                          a_tag = h3.find("a")
+                          if not a_tag:
+                              continue
+
+                          content_tag = art.find("p", class_="content")
+                          engines_tag = art.find(class_="engines")
+
+                          parsed.append({
+                              "query": query,
+                              "date": now_iso(),
+                              "search_provider": engines_tag.get_text(strip=True) if engines_tag else "unknown",
+                              "title": a_tag.get_text(strip=True),
+                              "url": a_tag.get("href"),
+                              "snippet": content_tag.get_text(strip=True) if content_tag else "",
+                              "instance": instance,
+                              "mode": "public-html"
+                          })
+
+                      if parsed:
+                          return parsed
+
+                  except Exception:
+                      continue
+
+              return []
+
+          # Ensure base files
+          ensure_file(QUERIES_FILE, "open source\npython\n")
+          ensure_file(README_FILE, "# Search API\n\n")
+          ensure_file(RESULTS_FILE, "")
 
           # Load queries
           with open(QUERIES_FILE, "r", encoding="utf-8") as f:
@@ -137,38 +222,30 @@ jobs:
 
           with open(RESULTS_FILE, "a", encoding="utf-8") as outfile:
               for query in queries:
+                  results = []
+
+                  # Try local SearXNG first
                   try:
-                      print(f"Searching: {query}")
-                      res = requests.get(
-                          SEARXNG_URL,
-                          params={"q": query, "format": "json"},
-                          timeout=30
-                      )
-                      res.raise_for_status()
-
-                      data = res.json()
-                      results = data.get("results", [])
-
-                      for r in results:
-                          item = {
-                              "query": query,
-                              "date": now_iso(),
-                              "search_provider": r.get("engine", "unknown"),
-                              "title": r.get("title", ""),
-                              "url": r.get("url", ""),
-                              "snippet": r.get("content", "")
-                          }
-                          outfile.write(json.dumps(item, ensure_ascii=False) + "\n")
-                          total_new_results += 1
-
-                      print(f"Got {len(results)} results for: {query}")
-                      time.sleep(2)
-
+                      results = search_local_json(query)
+                      if results:
+                          print(f"Local SearXNG worked for '{query}' with {len(results)} results")
                   except Exception as e:
-                      print(f"Error for query '{query}': {e}")
-                      continue
+                      print(f"Local SearXNG failed for '{query}': {e}")
 
-          # Metadata
+                  # Fallback to public instances
+                  if not results:
+                      results = search_public_html(query)
+                      if results:
+                          print(f"Fallback public HTML worked for '{query}' with {len(results)} results")
+                      else:
+                          print(f"No results for '{query}' from either local or fallback")
+
+                  for item in results:
+                      outfile.write(json.dumps(item, ensure_ascii=False) + "\n")
+                      total_new_results += 1
+
+                  time.sleep(2)
+
           whole_size = os.path.getsize(RESULTS_FILE)
           with open(RESULTS_FILE, "r", encoding="utf-8") as f:
               total_results = sum(1 for _ in f)
@@ -182,7 +259,6 @@ jobs:
           with open(METADATA_FILE, "w", encoding="utf-8") as f:
               json.dump(metadata, f, indent=2)
 
-          # Update README
           with open(README_FILE, "r", encoding="utf-8") as f:
               text = f.read()
 
@@ -203,19 +279,17 @@ jobs:
           with open(README_FILE, "w", encoding="utf-8") as f:
               f.write(text + "\n")
 
-          # Upload to Internet Archive
-          print("Authenticating with Internet Archive...")
           config = {
               "s3": {
-                  "access": ia_access,
-                  "secret": ia_secret
+                  "access": IA_ACCESS,
+                  "secret": IA_SECRET
               }
           }
 
           session = get_session(config)
           item = session.get_item("ScrapeBin-Search")
 
-          print("Uploading files to Internet Archive...")
+          print("Uploading to Internet Archive...")
           item.upload(
               [RESULTS_FILE, METADATA_FILE],
               metadata={
@@ -225,7 +299,7 @@ jobs:
           )
           print("Upload successful.")
 
-      - name: Commit and Push README changes
+      - name: Commit and push README changes
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
@@ -236,7 +310,7 @@ jobs:
       - name: Show SearXNG log on failure
         if: failure()
         run: |
-          echo "----- SearXNG LOG -----"
+          echo "----- searxng log -----"
           cat /tmp/searxng.log || true
 
       - name: Cleanup
@@ -244,3 +318,4 @@ jobs:
         run: |
           kill $(cat /tmp/searxng.pid) 2>/dev/null || true
           rm -f /tmp/searxng.pid /tmp/searxng.log results.jsonl metadata.json
+          rm -rf searxng
