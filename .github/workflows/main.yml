@@ -2,14 +2,14 @@ name: Search API Pipeline
 
 on:
   schedule:
-    - cron: "0 0 * * *" # Runs every day at midnight UTC
-  workflow_dispatch:    # Allows you to click "Run workflow" manually
+    - cron: "0 0 * * *"
+  workflow_dispatch:
 
 jobs:
   scrape-and-upload:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Needed to push README changes
+      contents: write
 
     steps:
       - name: Checkout Repository
@@ -24,29 +24,27 @@ jobs:
         run: pip install requests beautifulsoup4 internetarchive
 
       - name: Run Scraper, Update, and Upload
+        shell: python
         env:
           IA_ACCESS_KEY: ${{ secrets.IA_ACCESS_KEY }}
           IA_SECRET_KEY: ${{ secrets.IA_SECRET_KEY }}
         run: |
-          cat << 'EOF' > pipeline.py
           import os, json, time, requests, re, sys
           from bs4 import BeautifulSoup
           from datetime import datetime, timezone
           from internetarchive import get_session
 
-          # Check Secrets First
           ia_access = os.environ.get("IA_ACCESS_KEY")
           ia_secret = os.environ.get("IA_SECRET_KEY")
           if not ia_access or not ia_secret:
-              print("ERROR: IA_ACCESS_KEY or IA_SECRET_KEY is missing! Check your GitHub Secrets.")
+              print("ERROR: IA_ACCESS_KEY or IA_SECRET_KEY is missing!")
               sys.exit(1)
 
-          # Configuration
           QUERIES_FILE = "queries.txt"
           RESULTS_FILE = "results.jsonl"
           METADATA_FILE = "metadata.json"
           README_FILE = "README.md"
-          
+
           INSTANCES = [
               "https://searx.be",
               "https://searxng.site",
@@ -57,14 +55,15 @@ jobs:
 
           HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
-          # 1. Ensure files exist
           if not os.path.exists(QUERIES_FILE):
-              with open(QUERIES_FILE, "w") as f: f.write("open source\npython\n")
+              with open(QUERIES_FILE, "w") as f:
+                  f.write("open source\npython\n")
           if not os.path.exists(README_FILE):
-              with open(README_FILE, "w") as f: f.write("# Search API\n\n")
-          open(RESULTS_FILE, 'a').close()
+              with open(README_FILE, "w") as f:
+                  f.write("# Search API\n\n")
+          if not os.path.exists(RESULTS_FILE):
+              open(RESULTS_FILE, "w").close()
 
-          # 2. Scrape Data
           with open(QUERIES_FILE, "r") as f:
               queries = [line.strip() for line in f if line.strip()]
 
@@ -73,19 +72,22 @@ jobs:
               for query in queries:
                   for instance in INSTANCES:
                       try:
-                          res = requests.get(f"{instance}/search", params={"q": query}, headers=HEADERS, timeout=15)
+                          res = requests.get(
+                              instance + "/search",
+                              params={"q": query},
+                              headers=HEADERS,
+                              timeout=15
+                          )
                           if res.status_code == 200:
                               soup = BeautifulSoup(res.text, "html.parser")
                               articles = soup.find_all("article", class_="result")
-                              
                               for art in articles:
                                   h3 = art.find("h3")
-                                  if not h3 or not h3.find("a"): continue
+                                  if not h3 or not h3.find("a"):
+                                      continue
                                   a_tag = h3.find("a")
-                                  
                                   content_tag = art.find("p", class_="content")
                                   engines_tag = art.find(class_="engines")
-                                  
                                   item = {
                                       "query": query,
                                       "date": datetime.now(timezone.utc).isoformat(),
@@ -96,12 +98,13 @@ jobs:
                                   }
                                   outfile.write(json.dumps(item, ensure_ascii=False) + "\n")
                                   total_new_results += 1
-                              time.sleep(2) # Be polite
-                              break # Success, move to next query
-                      except Exception:
+                              print("Got " + str(total_new_results) + " results for: " + query + " via " + instance)
+                              time.sleep(2)
+                              break
+                      except Exception as e:
+                          print("Failed " + instance + " for " + query + ": " + str(e))
                           continue
 
-          # 3. Create Metadata
           whole_size = os.path.getsize(RESULTS_FILE)
           with open(RESULTS_FILE, "r", encoding="utf-8") as f:
               total_historical_results = sum(1 for _ in f)
@@ -114,48 +117,47 @@ jobs:
           with open(METADATA_FILE, "w", encoding="utf-8") as f:
               json.dump(metadata, f, indent=2)
 
-          # 4. Update README
           def format_size(size_bytes):
-              for unit in ['B', 'KB', 'MB', 'GB']:
-                  if size_bytes < 1024.0: return f"{size_bytes:.2f} {unit}"
-                  size_bytes /= 1024.0
-              return f"{size_bytes:.2f} TB"
+              for unit in ["B", "KB", "MB", "GB"]:
+                  if size_bytes < 1024.0:
+                      return str(round(size_bytes, 2)) + " " + unit
+                  size_bytes = size_bytes / 1024.0
+              return str(round(size_bytes, 2)) + " TB"
 
-          with open(README_FILE, "r", encoding="utf-8") as f: text = f.read()
+          with open(README_FILE, "r", encoding="utf-8") as f:
+              text = f.read()
 
-          for label, val in [
+          updates = [
               ("Number of Results:", str(total_historical_results)),
               ("Time when updated:", metadata["last_updated"]),
               ("Whole size:", format_size(whole_size))
-          ]:
-              pattern = rf"^{re.escape(label)}.*$"
+          ]
+          for label, val in updates:
+              pattern = "^" + re.escape(label) + ".*$"
+              replacement = label + " " + val
               if re.search(pattern, text, flags=re.MULTILINE):
-                  text = re.sub(pattern, f"{label} {val}", text, flags=re.MULTILINE)
+                  text = re.sub(pattern, replacement, text, flags=re.MULTILINE)
               else:
-                  text = text.strip() + f"\n{label} {val}"
+                  text = text.rstrip() + "\n" + replacement
 
-          with open(README_FILE, "w", encoding="utf-8") as f: f.write(text + "\n")
+          with open(README_FILE, "w", encoding="utf-8") as f:
+              f.write(text + "\n")
 
-          # 5. Upload to Internet Archive (Using the AI's exact method)
           print("Authenticating with Internet Archive...")
           config = {
-              's3': {
-                  'access': ia_access,
-                  'secret': ia_secret,
+              "s3": {
+                  "access": ia_access,
+                  "secret": ia_secret
               }
           }
           session = get_session(config)
-          item = session.get_item('ScrapeBin-Search')
-          
+          item = session.get_item("ScrapeBin-Search")
           print("Uploading files...")
           item.upload(
-              ['results.jsonl', 'metadata.json'], 
-              metadata={'title': 'ScrapeBin Search API', 'mediatype': 'data'}
+              ["results.jsonl", "metadata.json"],
+              metadata={"title": "ScrapeBin Search API", "mediatype": "data"}
           )
           print("Upload Successful!")
-          EOF
-          
-          python pipeline.py
 
       - name: Commit and Push README changes
         run: |
@@ -164,49 +166,5 @@ jobs:
           git add README.md
           git diff --quiet && git diff --staged --quiet || (git commit -m "Update README stats automatically" && git push)
 
-      - name: Delete files from GitHub Runner
-        run: |
-          rm -f results.jsonl metadata.json pipeline.py              json.dump(metadata, f, indent=2)
-
-          # 4. Update README
-          def format_size(size_bytes):
-              for unit in ['B', 'KB', 'MB', 'GB']:
-                  if size_bytes < 1024.0: return f"{size_bytes:.2f} {unit}"
-                  size_bytes /= 1024.0
-              return f"{size_bytes:.2f} TB"
-
-          with open(README_FILE, "r", encoding="utf-8") as f: text = f.read()
-
-          for label, val in [
-              ("Number of Results:", str(total_historical_results)),
-              ("Time when updated:", metadata["last_updated"]),
-              ("Whole size:", format_size(whole_size))
-          ]:
-              pattern = rf"^{re.escape(label)}.*$"
-              if re.search(pattern, text, flags=re.MULTILINE):
-                  text = re.sub(pattern, f"{label} {val}", text, flags=re.MULTILINE)
-              else:
-                  text = text.strip() + f"\n{label} {val}"
-
-          with open(README_FILE, "w", encoding="utf-8") as f: f.write(text + "\n")
-          EOF
-          
-          python pipeline.py
-
-      - name: Commit and Push README changes
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add README.md
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update README stats automatically" && git push)
-
-      - name: Upload to Internet Archive
-        env:
-          IA_ACCESS_KEY: ${{ secrets.IA_ACCESS_KEY }}
-          IA_SECRET_KEY: ${{ secrets.IA_SECRET_KEY }}
-        run: |
-          ia upload "ScrapeBin-Search" results.jsonl metadata.json --metadata="title:ScrapeBin Search API" --metadata="mediatype:data"
-
-      - name: Delete files from GitHub Runner
-        run: |
-          rm -f results.jsonl metadata.json pipeline.py
+      - name: Delete generated files
+        run: rm -f results.jsonl metadata.json
