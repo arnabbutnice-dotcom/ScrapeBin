@@ -20,8 +20,42 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Dependencies
-        run: pip install requests beautifulsoup4 internetarchive
+      - name: Install SearXNG and Dependencies
+        run: |
+          git clone https://github.com/searxng/searxng.git --depth 1
+          cd searxng
+          pip install .
+          pip install internetarchive
+
+      - name: Create SearXNG Settings
+        run: |
+          mkdir -p searxng-config
+          cat > searxng-config/settings.yml << 'SETTINGS'
+          use_default_settings: true
+          search:
+            formats:
+              - html
+              - json
+          server:
+            secret_key: "scrapebin-github-actions-key"
+            bind_address: "127.0.0.1:8080"
+          SETTINGS
+
+      - name: Start SearXNG
+        run: |
+          export SEARXNG_SETTINGS_PATH=$(pwd)/searxng-config/settings.yml
+          cd searxng
+          nohup python -m searx.webapp > /tmp/searxng.log 2>&1 &
+          echo $! > /tmp/searxng.pid
+          echo "Waiting for SearXNG to start..."
+          for i in $(seq 1 60); do
+            if curl -s http://127.0.0.1:8080 > /dev/null 2>&1; then
+              echo "SearXNG is ready!"
+              break
+            fi
+            echo "Waiting... ($i/60)"
+            sleep 2
+          done
 
       - name: Run Scraper, Update, and Upload
         shell: python
@@ -30,7 +64,6 @@ jobs:
           IA_SECRET_KEY: ${{ secrets.IA_SECRET_KEY }}
         run: |
           import os, json, time, requests, re, sys
-          from bs4 import BeautifulSoup
           from datetime import datetime, timezone
           from internetarchive import get_session
 
@@ -40,20 +73,11 @@ jobs:
               print("ERROR: IA_ACCESS_KEY or IA_SECRET_KEY is missing!")
               sys.exit(1)
 
+          SEARXNG_URL = "http://127.0.0.1:8080/search"
           QUERIES_FILE = "queries.txt"
           RESULTS_FILE = "results.jsonl"
           METADATA_FILE = "metadata.json"
           README_FILE = "README.md"
-
-          INSTANCES = [
-              "https://searx.be",
-              "https://searxng.site",
-              "https://search.ononoki.org",
-              "https://priv.au",
-              "https://paulgo.io"
-          ]
-
-          HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
           if not os.path.exists(QUERIES_FILE):
               with open(QUERIES_FILE, "w") as f:
@@ -70,40 +94,36 @@ jobs:
           total_new_results = 0
           with open(RESULTS_FILE, "a", encoding="utf-8") as outfile:
               for query in queries:
-                  for instance in INSTANCES:
-                      try:
-                          res = requests.get(
-                              instance + "/search",
-                              params={"q": query},
-                              headers=HEADERS,
-                              timeout=15
-                          )
-                          if res.status_code == 200:
-                              soup = BeautifulSoup(res.text, "html.parser")
-                              articles = soup.find_all("article", class_="result")
-                              for art in articles:
-                                  h3 = art.find("h3")
-                                  if not h3 or not h3.find("a"):
-                                      continue
-                                  a_tag = h3.find("a")
-                                  content_tag = art.find("p", class_="content")
-                                  engines_tag = art.find(class_="engines")
-                                  item = {
-                                      "query": query,
-                                      "date": datetime.now(timezone.utc).isoformat(),
-                                      "search_provider": engines_tag.get_text(strip=True) if engines_tag else "unknown",
-                                      "title": a_tag.get_text(strip=True),
-                                      "url": a_tag.get("href"),
-                                      "snippet": content_tag.get_text(strip=True) if content_tag else ""
-                                  }
-                                  outfile.write(json.dumps(item, ensure_ascii=False) + "\n")
-                                  total_new_results += 1
-                              print("Got " + str(total_new_results) + " results for: " + query + " via " + instance)
-                              time.sleep(2)
-                              break
-                      except Exception as e:
-                          print("Failed " + instance + " for " + query + ": " + str(e))
-                          continue
+                  try:
+                      print("Searching: " + query)
+                      res = requests.get(
+                          SEARXNG_URL,
+                          params={"q": query, "format": "json"},
+                          timeout=30
+                      )
+                      if res.status_code == 200:
+                          data = res.json()
+                          results = data.get("results", [])
+                          for r in results:
+                              item = {
+                                  "query": query,
+                                  "date": datetime.now(timezone.utc).isoformat(),
+                                  "search_provider": r.get("engine", "unknown"),
+                                  "title": r.get("title", ""),
+                                  "url": r.get("url", ""),
+                                  "snippet": r.get("content", "")
+                              }
+                              outfile.write(json.dumps(item, ensure_ascii=False) + "\n")
+                              total_new_results += 1
+                          print("Got " + str(len(results)) + " results for: " + query)
+                      else:
+                          print("Bad status " + str(res.status_code) + " for: " + query)
+                      time.sleep(2)
+                  except Exception as e:
+                      print("Error for " + query + ": " + str(e))
+                      continue
+
+          print("Total new results this run: " + str(total_new_results))
 
           whole_size = os.path.getsize(RESULTS_FILE)
           with open(RESULTS_FILE, "r", encoding="utf-8") as f:
@@ -166,5 +186,7 @@ jobs:
           git add README.md
           git diff --quiet && git diff --staged --quiet || (git commit -m "Update README stats automatically" && git push)
 
-      - name: Delete generated files
-        run: rm -f results.jsonl metadata.json
+      - name: Cleanup
+        run: |
+          kill $(cat /tmp/searxng.pid) 2>/dev/null || true
+          rm -rf results.jsonl metadata.json searxng/ searxng-config/
