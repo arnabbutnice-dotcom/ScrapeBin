@@ -1,7 +1,8 @@
 # Search API
-Number of Results: 11
-Time when updated: 2026-08-25T00:33:24.393626+00:00
-Whole size: 5.12 KB
+Number of Results: 1
+Time when updated: 2026-08-26T00:34:10.472687+00:00
+Whole size: 271 B
+
 
 
 
